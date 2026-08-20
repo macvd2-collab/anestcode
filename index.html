@@ -444,6 +444,11 @@ const SINONIMOS = {
   traqueostomia:["traqueostomia"], pcnl:["nefrolitotripsia"],
   histeroscopia:["histeroscopia"], curetagem:["curetagem"],
   hernia:["herniorrafia","hernioplastia"], hernias:["herniorrafia"],
+  // a tabela diz "Fraturas de X - tratamento cirurgico"; o relatorio diz "osteossintese"
+  osteossintese:["fratura"], osteossintesis:["fratura"],
+  bexiga:["vesical"], vesical:["bexiga"], rim:["renal"], rins:["renal"],
+  utero:["uterina","uterino"], prostata:["prostatica","prostatico"],
+  mama:["mamaria"], femur:["femoral"], tireoide:["tireoidiana"],
   colono:["colonoscopia"], endoscopia:["endoscopia","esofagogastroduodenoscopia"],
   edа:["esofagogastroduodenoscopia"], eda:["esofagogastroduodenoscopia"]
 };
@@ -518,13 +523,15 @@ function buscar(consulta, opc){
      Titulo que nao casa a ancora esta falando de outra cirurgia, por mais
      qualificadores que compartilhe: "colecistectomia aberta" nao e
      "Pleurostomia (aberta)". */
-  // aqui o ato e o SUFIXO cirurgico, nao a lista ampla da segmentacao:
-  // "implante" e verbo generico demais para eliminar candidato.
-  const atos = alvo.filter(x => alternativas(x).some(t => RX_SUFIXO.test(t)));
-  const pool = atos.length ? atos : alvo;
+  /* A ancora tem de ser o ATO — sufixo cirurgico ou verbo da lista. Deixar
+     qualquer token virar ancora pelo peso quebrava "parto normal": "normal" e
+     mais raro na tabela que "parto", virava obrigatorio e eliminava
+     "Parto (via vaginal)". Sem ato reconhecivel, ninguem e obrigatorio.
+     O corte por peso continua protegendo dos verbos genericos ("implante"). */
+  const atos = alvo.filter(x => alternativas(x).some(t => RX_SUFIXO.test(t) || ANCORAS.has(t)));
   let anc=null, wmax=0;
-  for(const x of pool){ const w=peso(x); if(w>wmax){wmax=w; anc=x;} }
-  const ancoraVale = wmax >= 4.2 && !opc.semAncora;
+  for(const x of atos){ const w=peso(x); if(w>wmax){wmax=w; anc=x;} }
+  const ancoraVale = atos.length > 0 && wmax >= 4.2 && !opc.semAncora;
 
   const out=[];
   for(const id of candidatos(alvo)){
@@ -610,32 +617,55 @@ function unirLinhas(t){
                   .replace(/([^.;:!?\n])[ \t]*\n[ \t]*(?=[a-zà-ÿ0-9(])/g, "$1 ");
 }
 
+/* Linhas de diagnostico e historia citam cirurgia que NAO foi feita agora
+   ("antecedente de apendicectomia previa"). Saem antes de procurar o ato. */
+const RX_NAO_E_ATO = /^[ \t]*(indica[çc][ãa]o|diagn[óo]sticos?[^:\n]{0,24}|antecedentes?[^:\n]{0,20}|hda|hp|hist[óo]ria[^:\n]{0,20}|hip[óo]tese[^:\n]{0,20}|cid)[ \t]*:[^\n]*$/gim;
+
+/* Cabecalho da ficha: nao ha procedimento nenhum nessas linhas, e o conteudo
+   delas casava titulo por acaso ("Anestesia: geral" achava "Manipulacao
+   articular sob anestesia"). */
+const RX_ADMIN = /^[ \t]*(paciente|nome|registro|prontu[áa]rio|matr[íi]cula|conv[êe]nio|plano|leito|sala|quarto|data|hora|hor[áa]rio|in[íi]cio|t[ée]rmino|fim|cirurgi[ãa]o|1[ºo]?\s*auxiliar|2[ºo]?\s*auxiliar|auxiliar(?:es)?|anestesia|anestesista|anestesiologista|t[ée]cnica|instrumentador[a]?|acomoda[çc][ãa]o|idade|sexo|peso|altura|asa)[ \t]*:[^\n]*$/gim;
+
 function segmentar(texto){
   texto = unirLinhas(texto);
-  // 1) linhas rotuladas valem mais que o corpo do relatorio
-  const rot = [];
-  const rxRot = /(?:procedimento|cirurgia|opera[cç][aã]o|ato cir[uú]rgico|cirurgia realizada|procedimento realizado|proposta cir[uú]rgica|descri[cç][aã]o cir[uú]rgica)\s*:\s*([^\n\r]{4,200})/gi;
-  let m;
-  while((m = rxRot.exec(texto)) !== null) rot.push(m[1]);
-  const base = rot.length ? rot.join(" ; ") : texto;
 
-  // 2) tokeniza preservando separadores, para nao fundir procedimentos distintos
-  const brutos = base.split(/\s+/).filter(Boolean);
-  const pal = brutos.map(p => ({
-    raw: p,
-    n: norm(p).trim(),
-    sep: /[;+\/,]|\be\b/i.test(p) || /[;+\/,]$/.test(p)
-  }));
+  /* O relatorio inteiro e o material — nao so a linha do rotulo.
+     "Descricao cirurgica:" costuma abrir a PRIMEIRA cirurgia; as outras vem
+     nas linhas seguintes, sem rotulo nenhum. Filtrar pelo rotulo fazia o app
+     perder cirurgia calado, que e o pior erro possivel aqui. */
+  const base = texto.replace(RX_NAO_E_ATO, " ").replace(RX_ADMIN, " ");
+
+  /* 2) tokeniza preservando separadores e FIM DE LINHA. Depois de unirLinhas(),
+        uma quebra que sobrou e quebra de verdade: separa campos da ficha
+        ("Procedimento: ..." / "Anestesia: ..." / "Cirurgiao: ..."). Sem essa
+        barreira, a janela de um campo invade o outro e a busca vira sopa. */
+  const pal = [];
+  base.split("\n").forEach(linha => {
+    const ps = linha.split(/\s+/).filter(Boolean);
+    ps.forEach((p, k) => pal.push({
+      raw: p,
+      n: norm(p).trim(),
+      sep: /[;+\/,]|\be\b/i.test(p) || /[;+\/,]$/.test(p),
+      fimLinha: k === ps.length - 1
+    }));
+  });
 
   const anc = [];
   for(let i=0;i<pal.length;i++){
     const t = pal[i].n.replace(/\s+/g,"");
-    if(!t || t.length<4 || PARE.has(t)) continue;
+    // "RTU" tem 3 letras e e o ato inteiro; o corte por tamanho existe so para
+    // nao transformar preposicao em ancora
+    if(!t || PARE.has(t) || (t.length < 4 && !ANCORAS.has(t))) continue;
     if(eAncora(t)) anc.push(i);
   }
   if(!anc.length){
-    const limpo = base.trim().slice(0,160);
-    return limpo ? {n:1, jan:[[limpo]]} : {n:0, jan:[]};
+    const linhas = base.split("\n").map(l => l.trim())
+                       .filter(l => l.length > 3).slice(0, 12);
+    if(!linhas.length){
+      const limpo = base.trim().slice(0,160);
+      return limpo ? {n:1, jan:[[limpo]]} : {n:0, jan:[]};
+    }
+    return {n: linhas.length, jan: linhas.map(l => [l.slice(0,160)]), semAncora: true};
   }
 
   /* 3) para cada ancora, as janelas possiveis: ela sozinha, ela + a proxima,
@@ -646,6 +676,8 @@ function segmentar(texto){
   const janela = (ini, fim, limA, limB) => {
     let a = Math.max(0, ini-5), b = Math.min(pal.length-1, fim+6);
     a = Math.max(a, limA); b = Math.min(b, limB);
+    for(let i=ini-1;i>=a;i--) if(pal[i].fimLinha){ a=i+1; break; }      // nao invade a linha de cima
+    for(let i=fim;i<b;i++)    if(pal[i].fimLinha){ b=i; break; }        // nem a de baixo
     for(let i=ini-1;i>=a;i--) if(/[.;:]/.test(pal[i].raw)){ a=i+1; break; }
     for(let i=fim;i<=b;i++)   if(/[.;:]$/.test(pal[i].raw)){ b=i; break; }
     for(let i=ini-1;i>=a;i--) if(pal[i].sep || /^e$/.test(pal[i].n.trim())){ a=i+1; break; }
@@ -660,7 +692,7 @@ function segmentar(texto){
       if(k>1){
         let sep=false;
         for(let j=anc[i]; j<anc[i+k-1]; j++)
-          if(pal[j].sep || /^e$/.test(pal[j].n.trim())) sep=true;
+          if(pal[j].sep || pal[j].fimLinha || /^e$/.test(pal[j].n.trim())) sep=true;
         if(sep || anc[i+k-1]-anc[i] > 9) break;    // separador: sao atos distintos
       }
       linha.push(janela(anc[i], anc[i+k-1],
@@ -749,7 +781,7 @@ function hoje(){
 function analisar(texto){
   const soAnest = $("#prefBusca").value === "anest";
   const n = parseInt($("#prefN").value, 10) || 5;
-  const {n: qtd, jan} = segmentar(texto);
+  const {n: qtd, jan, semAncora} = segmentar(texto);
   if(!qtd) return [];
 
   /* 1. avalia cada janela candidata */
@@ -775,7 +807,10 @@ function analisar(texto){
         sempre "ganharia", porque um pedaco curto casa um titulo curto com nota
         cheia. Com o custo, so vale abrir em dois se as duas partes se
         sustentarem sozinhas. */
-  const CUSTO = 1.25;
+  /* Sem ato cirurgico identificado, cada linha e um chute: so passa quem casar
+     quase o titulo inteiro. Melhor nao achar nada do que afirmar cirurgia que
+     nao houve. */
+  const CUSTO = semAncora ? 1.75 : 1.25;
   const dp = new Array(qtd+1).fill(-Infinity), esc = new Array(qtd+1).fill(null);
   dp[0] = 0;
   for(let i=1;i<=qtd;i++){
@@ -1033,7 +1068,14 @@ function linhaTabela(r){
 /* `redraw` e quem redesenha a lista onde a linha esta: a mesma linha aparece na
    aba Tabela, na Sistemas e nos Salvos, e cada uma se redesenha do seu jeito. */
 function ligarLinhas(box, redraw){
-  const refaz = () => { (redraw || renderTabela)(); if(redraw !== renderFavoritos) renderFavoritos(); };
+  const refaz = () => {
+    (redraw || renderTabela)();
+    // a mesma estrela aparece em tres lugares: quem nao foi redesenhado fica
+    // mostrando o estado velho ate a proxima busca
+    if(redraw !== renderTabela && $("#listaTabela").innerHTML) renderTabela();
+    if(redraw !== renderNav && $("#listaNav").innerHTML) renderNav();
+    if(redraw !== renderFavoritos) renderFavoritos();
+  };
   box.querySelectorAll(".r").forEach(el => {
     if(!el.dataset.c) return;                 // linha de navegacao, nao de procedimento
     el.addEventListener("click", ev => {
