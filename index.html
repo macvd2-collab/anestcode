@@ -376,13 +376,27 @@ const IDX = new Map(), IDXP = new Map();
    cirurgia; "aberta", "tratamento" e "cirurgico" aparecem em centenas e nao
    identificam nada. Sem esse peso, "colecistectomia aberta" ranqueia
    "Pleurostomia (aberta)" acima de "Colecistectomia" — verificado. */
+const idf = df => Math.log(DB.length/df) + 0.3;
+
 function peso(t){
   let melhor = 0;
   for(const alt of alternativas(t)){
     const df = (IDX.get(alt)||[]).length;
-    if(df) melhor = Math.max(melhor, Math.log(DB.length/df) + 0.3);
+    if(df) melhor = Math.max(melhor, idf(df));
   }
-  return melhor || 0.8;                     // termo que nem existe na tabela nao decide nada
+  if(melhor) return melhor;
+
+  /* Termo que a tabela nomeia de outro jeito ("hidrocelectomia" x "Hidrocele
+     unilateral - correcao") nao esta no indice, e cair no piso fazia dele um
+     token irrelevante: "hidrocelectomia a direita" achava "Lobectomia hepatica
+     DIREITA". O prefixo estima quantos titulos falam do mesmo assunto. */
+  for(const alt of alternativas(t)){
+    if(alt.length >= 5){
+      const df = (IDXP.get(alt.slice(0,5))||[]).length;
+      if(df) return idf(df);
+    }
+  }
+  return 0.8;
 }
 
 /* ============================================================
@@ -413,10 +427,36 @@ function dice(a,b){                       // similaridade por bigramas (0..1)
   return 2*hit/(a.length+b.length-2);
 }
 
+/* raiz = o termo sem o sufixo cirurgico: "hidrocelectomia" -> "hidrocel" */
+function raiz(t){ const s = sufixo(t); return s ? t.slice(0, t.length - s.length) : t; }
+
 function casam(a,b){
   if(a===b) return true;
   const sa=sufixo(a), sb=sufixo(b);
-  if(sa&&sb&&sa!==sb) return false;                  // atos diferentes
+  if(sa && sb && sa!==sb) return false;              // atos diferentes
+
+  /* Compara sempre a RAIZ. O sufixo e igual em meia tabela: com a palavra
+     inteira, "hidrocelectomia" e "lobectomia" ficam parecidas demais e um
+     orgao entra no lugar do outro. */
+  const ra = raiz(a), rb = raiz(b);
+
+  if(sa && sb){                                      // mesmo ato, orgao diferente?
+    if(ra === rb) return true;
+    const curta = ra.length<=rb.length ? ra : rb, longa = ra.length<=rb.length ? rb : ra;
+    if(curta.length < 4) return false;
+    if(longa.length - curta.length <= 3 && longa.startsWith(curta)) return true;
+    return dice(ra, rb) >= (curta.length >= 8 ? 0.86 : 0.90);
+  }
+
+  if(!!sa !== !!sb){
+    /* O relatorio nomeia o ATO ("hidrocelectomia"), a tabela nomeia a DOENCA ou
+       o ORGAO ("Hidrocele unilateral - correcao"). Raiz longa para nao
+       aproximar "mastectomia" de "mastoide". */
+    const r = sa ? ra : rb, outro = sa ? b : a;
+    if(r.length >= 6 && (outro.startsWith(r) || r.startsWith(outro)) &&
+       Math.abs(outro.length - r.length) <= 4) return true;
+  }
+
   const curto = a.length<=b.length?a:b, longo = a.length<=b.length?b:a;
   if(curto.length<5) return false;
   // tolera flexao da tecnica: "videolaparoscopica" no texto x "videolaparoscopia" na tabela
@@ -540,12 +580,16 @@ function buscar(consulta, opc){
     let casado=0, total=0, comuns=0, temAncora=false;
     for(const x of alvo){
       const w = peso(x); total += w;
-      let bateu=false;
+      let bateu = 0;                       // 0 nao casou · 1 aproximado · 2 exato
       for(const alt of alternativas(x)){
-        for(const y of r.tk){ if(casam(alt,y)){ bateu=true; break; } }
-        if(bateu) break;
+        for(const y of r.tk){
+          if(alt === y){ bateu = 2; break; }
+          if(!bateu && casam(alt,y)) bateu = 1;
+        }
+        if(bateu === 2) break;
       }
-      if(bateu){ casado += w; comuns++; if(x===anc) temAncora=true; }
+      // exato pesa mais: "Timpanoplastia" deve vir antes de "Timpano-mastoidectomia"
+      if(bateu){ casado += w * (bateu === 2 ? 1 : 0.85); comuns++; if(x===anc) temAncora=true; }
     }
     if(!comuns) continue;
     if(ancoraVale && !temAncora) continue;   // sem o ato cirurgico nao e candidato
@@ -692,8 +736,9 @@ function segmentar(texto){
       if(k>1){
         let sep=false;
         for(let j=anc[i]; j<anc[i+k-1]; j++)
-          if(pal[j].sep || pal[j].fimLinha || /^e$/.test(pal[j].n.trim())) sep=true;
-        if(sep || anc[i+k-1]-anc[i] > 9) break;    // separador: sao atos distintos
+          if(pal[j].sep || pal[j].fimLinha || /[.;:]$/.test(pal[j].raw) || /^e$/.test(pal[j].n.trim()))
+            sep = true;     // ponto final separa dois atos: nao existe fusao por cima dele
+        if(sep || anc[i+k-1]-anc[i] > 9) break;
       }
       linha.push(janela(anc[i], anc[i+k-1],
                         i>0 ? anc[i-1]+1 : 0,
@@ -768,6 +813,21 @@ const st = {
 };
 
 const VIAS = [["u","Única · 100%"],["m","Mesma via · 50%"],["d","Diferentes vias · 70%"]];
+
+/* Orgao impar/mediano nao tem lado — e lancar duas linhas dele e faturar em
+   duplicidade. A palavra "bilateral" costuma vir de outro ato da mesma
+   descricao ("prostatectomia radical. Linfadenectomia BILATERAL"). */
+const SEM_LADO = new RegExp([
+  "prostat","vesicul","bexiga","vesical","uretra","utero","uterin","vagina",
+  "colo do utero","cervice","esofag","estomag","gastr","duoden","jejun","ileo","colon","c[oó]lon",
+  "sigmoid","reto","retal","anus","anal","hemorroid","figado","hepat","biliar","colecist","colangi",
+  "pancrea","baco","esplen","apendic","coracao","cardiac","aorta","traqueia","laringe","faringe",
+  "lingua","nariz","nasal","septo","cranio","encefal","cerebr","coluna","vertebr","medula",
+  "tireoid","paratireoid","timo","diafragma","umbilic","peritoni","mediastin","epiplon","mesenteri",
+  "bacia","pelvic","perine","penis","peniana","cesarian","parto"
+].join("|"), "i");
+
+function podeTerLado(titulo){ return !SEM_LADO.test(norm(titulo)); }
 
 function hoje(){
   const d=new Date(), p=n=>String(n).padStart(2,"0");
@@ -863,7 +923,7 @@ function renderAnalise(){
   box.innerHTML = st.achados.map((a, ia) => `
     <div class="ach">
       <div class="h">
-        <div class="t">Procedimento ${ia+1}${a.lado ? ` · <span style="color:var(--warn)">${esc(a.lado)}</span>` : ""}</div>
+        <div class="t">Procedimento ${ia+1}${(a.lado && a.opts.some(o => a.sel.has(o.r.c) && podeTerLado(o.r.t))) ? ` · <span style="color:var(--warn)">${esc(a.lado)}</span>` : ""}</div>
         <div class="q">“${esc(a.q.length>120 ? a.q.slice(0,120)+"…" : a.q)}”</div>
         ${a.motivo ? `<div class="q" style="font-style:normal;color:#9ab6ff;margin-top:5px">🧠 ${esc(a.motivo)}</div>` : ""}
       </div>
@@ -901,11 +961,12 @@ function montarLinhas(){
   for(const a of st.achados){
     for(const o of a.opts){
       if(!a.sel.has(o.r.c)) continue;
-      if(a.lado === "bilateral"){
+      const lado = podeTerLado(o.r.t) ? a.lado : "";
+      if(lado === "bilateral"){
         linhas.push({r:o.r, lado:"direita",  via:null});
         linhas.push({r:o.r, lado:"esquerda", via:null});
       }else{
-        linhas.push({r:o.r, lado:a.lado, via:null});
+        linhas.push({r:o.r, lado, via:null});
       }
     }
   }
