@@ -68,6 +68,9 @@ select{background-image:url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http:
 .btn[disabled]{opacity:.42}
 .btns{display:flex;gap:8px;flex-wrap:wrap}
 .btns .btn{flex:1;min-width:104px}
+/* 4 entradas (ditar, foto/PDF, colar, limpar) em 2 linhas de 2: alvo de toque
+   grande, que e como o app e usado — de pe, com pressa, no centro cirurgico */
+.btns.duas .btn{min-width:150px}
 .rec{background:rgba(239,95,95,.16);border-color:rgba(239,95,95,.5);color:#ff9b9b}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
 .rec.on{animation:pulse 1.1s ease-in-out infinite}
@@ -170,16 +173,16 @@ nav button.on{color:var(--acc)}
 <section class="view on" id="v-analisar">
   <div class="card">
     <h2>Descrição cirúrgica</h2>
-    <textarea id="txt" placeholder="Cole, dite ou fotografe a descrição do procedimento.
+    <textarea id="txt" placeholder="Cole, dite, fotografe ou abra o PDF da descrição.
 
 Ex.: Colecistectomia videolaparoscópica sem colangiografia. Herniorrafia inguinal bilateral."></textarea>
-    <div class="btns" style="margin-top:10px">
+    <div class="btns duas" style="margin-top:10px">
       <button class="btn sm" id="bVoz">🎤 Ditar</button>
-      <button class="btn sm" id="bFoto">📷 Foto</button>
+      <button class="btn sm" id="bFoto">📷 Foto ou PDF</button>
       <button class="btn sm" id="bCola">📋 Colar</button>
       <button class="btn sm gh" id="bLimpa">Limpar</button>
     </div>
-    <input type="file" id="fFoto" accept="image/*" style="display:none">
+    <input type="file" id="fFoto" accept="image/*,application/pdf,.pdf" style="display:none">
     <div class="btns" style="margin-top:10px">
       <button class="btn pri" id="bAnalisa" style="flex:2">Analisar</button>
     </div>
@@ -221,9 +224,10 @@ Ex.: Colecistectomia videolaparoscópica sem colangiografia. Herniorrafia inguin
   <div class="card">
     <h2>Inteligência artificial (opcional)</h2>
     <p class="hint" style="margin:0 0 12px">
-      Sem chave, o Anestcode funciona <b>100% offline</b>: busca por texto na tabela TUSS local.
-      Com chave da API Anthropic, ele também <b>lê foto</b> da descrição cirúrgica e <b>escolhe entre os
-      candidatos</b> que a busca local encontrou — a IA nunca inventa código, só escolhe entre os que existem na tabela.
+      Sem chave, o Anestcode funciona <b>100% offline</b>: busca na tabela TUSS local e leitura de
+      <b>PDF com texto</b> (o que o sistema do hospital imprime). Com chave da API Anthropic, ele também lê
+      <b>foto e PDF escaneado</b> e <b>escolhe entre os candidatos</b> que a busca local encontrou —
+      a IA nunca inventa código, só escolhe entre os que existem na tabela.
     </p>
     <label>Chave da API (fica só neste aparelho)</label>
     <input type="password" id="apiKey" placeholder="sk-ant-..." autocomplete="off">
@@ -597,7 +601,17 @@ const PARE = new Set(["paciente","anestesia","raquianestesia","peridural","geral
 
 function eAncora(t){ return RX_SUFIXO.test(t) || ANCORAS.has(t); }
 
+/* PDF e relatorio impresso quebram a frase no meio da linha:
+   "...colecistectomia videolaparoscopica\nsem colangiografia".
+   Sem juntar de volta, o rotulo "Descricao cirurgica:" so entrega a
+   primeira linha e o segundo procedimento se perde. */
+function unirLinhas(t){
+  return String(t).replace(/\r/g, "\n")
+                  .replace(/([^.;:!?\n])[ \t]*\n[ \t]*(?=[a-zà-ÿ0-9(])/g, "$1 ");
+}
+
 function segmentar(texto){
+  texto = unirLinhas(texto);
   // 1) linhas rotuladas valem mais que o corpo do relatorio
   const rot = [];
   const rxRot = /(?:procedimento|cirurgia|opera[cç][aã]o|ato cir[uú]rgico|cirurgia realizada|procedimento realizado|proposta cir[uú]rgica|descri[cç][aã]o cir[uú]rgica)\s*:\s*([^\n\r]{4,200})/gi;
@@ -785,8 +799,12 @@ function analisar(texto){
   const achados = [], vistos = new Set();
   for(const g of escolhidos){
     if(!g.opts.length) continue;
-    if(vistos.has(g.opts[0].r.c)) continue;   // mesma cirurgia citada duas vezes no relatorio
-    vistos.add(g.opts[0].r.c);
+    /* Repetir codigo so e repeticao quando o LADO tambem se repete:
+       "herniorrafia inguinal a direita e herniorrafia inguinal a esquerda"
+       sao dois lancamentos (100% + 70%), nao um citado duas vezes. */
+    const chave = g.opts[0].r.c + "|" + lado(g.q);
+    if(vistos.has(chave)) continue;
+    vistos.add(chave);
 
     // regra da COOPANEST: um trecho pode trazer varios codigos confirmados de uma vez
     // (percutanea = nefrolitotripsia + duplo J + nefrostomia)
@@ -1306,6 +1324,192 @@ async function lerFoto(file){
   return {txt: txt.trim(), uso};
 }
 
+/* ============================================================
+   10b. PDF
+   Dois caminhos, escolhidos pelo proprio arquivo:
+
+   • PDF com camada de texto (o que o sistema do hospital imprime):
+     o texto sai aqui mesmo, offline, de graca.
+   • PDF escaneado (foto do app Notas, que e o caso da maioria das
+     fichas): nao ha texto nenhum para extrair — vai inteiro para a
+     IA, que le as paginas como imagem.
+
+   Sem biblioteca externa: pdf.js sozinho passaria de 300 KB e este
+   app precisa caber num arquivo que abre offline.
+   ============================================================ */
+
+/* Le o fluxo pedaco a pedaco e FICA COM O QUE JA VEIO se o fim estourar.
+   PDF real quase sempre traz um \n ou lixo depois dos dados comprimidos, e
+   um inflate tudo-ou-nada devolveria zero justamente nos arquivos que
+   interessam. */
+async function inflar(u8){
+  for(const fmt of ["deflate", "deflate-raw"]){
+    let partes = [], total = 0;
+    try{
+      const ds = new DecompressionStream(fmt);
+      const escritor = ds.writable.getWriter();
+      escritor.write(u8).catch(() => {});
+      escritor.close().catch(() => {});
+      const leitor = ds.readable.getReader();
+      try{
+        while(true){
+          const {value, done} = await leitor.read();
+          if(done) break;
+          partes.push(value); total += value.length;
+        }
+      }catch(e){ /* fim corrompido: vale o que ja saiu */ }
+    }catch(e){ /* formato errado: tenta o proximo */ }
+
+    if(total){
+      const saida = new Uint8Array(total);
+      let k = 0;
+      for(const p of partes){ saida.set(p, k); k += p.length; }
+      return saida;
+    }
+  }
+  return null;
+}
+
+const bin = u8 => { let s=""; for(let i=0;i<u8.length;i++) s += String.fromCharCode(u8[i]); return s; };
+
+/* Percorre o conteudo da pagina juntando o que estiver dentro dos
+   operadores de texto: (…)Tj, [(…)…]TJ, (…)' e (…)". */
+function textoDeConteudo(s){
+  const saida = [];
+  let i = 0, pendente = [];
+  const solta = () => { if(pendente.length){ saida.push(pendente.join("")); pendente = []; } };
+
+  while(i < s.length){
+    const c = s[i];
+
+    if(c === "("){                       // string literal, com parenteses aninhados
+      let nivel = 1, txt = "";
+      i++;
+      while(i < s.length && nivel > 0){
+        const d = s[i];
+        if(d === "\\"){
+          const e = s[i+1];
+          const oct = s.slice(i+1, i+4);
+          if(/^[0-7]{1,3}$/.test(oct)){ txt += String.fromCharCode(parseInt(oct, 8)); i += 1 + oct.length; continue; }
+          txt += ({n:"\n", r:"", t:"\t", b:"", f:""})[e] !== undefined ? ({n:"\n", r:"", t:"\t", b:"", f:""})[e] : e;
+          i += 2; continue;
+        }
+        if(d === "("){ nivel++; txt += d; i++; continue; }
+        if(d === ")"){ nivel--; if(nivel) txt += d; i++; continue; }
+        txt += d; i++;
+      }
+      pendente.push(txt);
+      continue;
+    }
+
+    if(c === "<" && s[i+1] !== "<"){     // string hexadecimal
+      const fim = s.indexOf(">", i);
+      if(fim < 0) break;
+      const hex = s.slice(i+1, fim).replace(/[^0-9a-fA-F]/g, "");
+      let txt = "";
+      if(hex.slice(0,4).toUpperCase() === "FEFF"){
+        for(let k=4; k+3 < hex.length+1; k+=4) txt += String.fromCharCode(parseInt(hex.substr(k,4), 16));
+      }else{
+        for(let k=0; k+1 < hex.length+1; k+=2) txt += String.fromCharCode(parseInt(hex.substr(k,2), 16));
+      }
+      pendente.push(txt);
+      i = fim + 1;
+      continue;
+    }
+
+    if(c === "T" || c === "'" || c === '"'){
+      const op = s.substr(i, 2);
+      if(op === "Tj" || op === "TJ"){ solta(); i += 2; continue; }
+      if(op === "Td" || op === "TD" || op === "T*"){ solta(); saida.push("\n"); i += 2; continue; }
+      if(c === "'" || c === '"'){ solta(); saida.push("\n"); i += 1; continue; }
+    }
+    if(c === "E" && s.substr(i,2) === "ET"){ solta(); saida.push("\n"); i += 2; continue; }
+
+    i++;
+  }
+  solta();
+  return saida.join("");
+}
+
+/* latin-1 e o que sai da maioria dos PDFs em portugues (WinAnsi) */
+function limpar(t){
+  return t.replace(/\r/g, "\n").replace(/[ \t]+/g, " ")
+          .replace(/\n{3,}/g, "\n\n").replace(/^\s+|\s+$/g, "");
+}
+
+/* Quanto do que saiu parece texto de verdade. PDF escaneado devolve
+   quase nada; fonte com encoding proprio devolve simbolo. */
+function pareceTexto(t){
+  if(t.length < 40) return 0;
+  const bons = (t.match(/[a-zA-ZÀ-ÿ0-9 .,;:()\/\-\n]/g) || []).length;
+  return bons / t.length;
+}
+
+async function pdfTexto(file){
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const bruto = bin(bytes);
+  if(bruto.slice(0, 1024).indexOf("%PDF") < 0)
+    return {texto:"", qualidade:0, invalido:true};
+  let junto = "";
+
+  let p = 0;
+  while(true){
+    const ini = bruto.indexOf("stream", p);
+    if(ini < 0) break;
+    const fim = bruto.indexOf("endstream", ini);
+    if(fim < 0) break;
+
+    const dic = bruto.slice(Math.max(0, ini - 400), ini);
+    let a = ini + 6;
+    if(bruto[a] === "\r") a++;
+    if(bruto[a] === "\n") a++;
+
+    // /Length diz onde os dados acabam; sem ele, corta o EOL antes de "endstream"
+    let b = fim;
+    const mLen = dic.match(/\/Length\s+(\d+)/);
+    if(mLen && a + (+mLen[1]) <= fim) b = a + (+mLen[1]);
+    else while(b > a && (bytes[b-1] === 10 || bytes[b-1] === 13 || bytes[b-1] === 32)) b--;
+
+    const cru = bytes.subarray(a, b);
+    let dados = null;
+    // pular imagem: numa ficha escaneada sao megabytes de bitmap sem texto algum,
+    // e tentar inflar cada uma custa segundos no iPhone
+    const ehImagem = /\/Subtype\s*\/Image|\/Image\b|\/DCTDecode|\/JPXDecode|\/CCITTFaxDecode/.test(dic);
+    if(!ehImagem && cru.length < 4*1024*1024){
+      if(/\/FlateDecode/.test(dic))   dados = await inflar(cru);
+      else if(!/\/Filter/.test(dic))  dados = cru;          // stream sem compressao
+    }
+
+    if(dados && dados.length){
+      const conteudo = bin(dados);
+      if(/(\bTj\b|\bTJ\b)/.test(conteudo)) junto += textoDeConteudo(conteudo) + "\n";
+    }
+    p = fim + 9;
+  }
+
+  const texto = limpar(junto);
+  return {texto, qualidade: pareceTexto(texto)};
+}
+
+/* PDF escaneado: a propria API le as paginas. */
+async function lerPdfComIA(file){
+  const b64 = await comoBase64(file);
+  const {txt, uso} = await claude([
+    {type:"document", source:{type:"base64", media_type:"application/pdf", data:b64}},
+    {type:"text", text:"Transcreva deste documento apenas a descrição do(s) procedimento(s) cirúrgico(s) realizado(s), incluindo técnica e lateralidade quando escritas. Sem comentários, sem interpretação, sem nome de paciente. Se não houver procedimento legível, responda: ILEGÍVEL."}
+  ], "Você transcreve documentos cirúrgicos com fidelidade literal. Nunca completa o que não está escrito.", 900);
+  return {txt: txt.trim(), uso};
+}
+
+function comoBase64(file){
+  return new Promise((ok, erro) => {
+    const fr = new FileReader();
+    fr.onload = () => ok(String(fr.result).split(",")[1]);
+    fr.onerror = () => erro(new Error("Não consegui ler o arquivo."));
+    fr.readAsDataURL(file);
+  });
+}
+
 /* reduz a foto antes de enviar: a API limita o lado maior a ~1568 px */
 function imagemBase64(file){
   return new Promise((ok, erro) => {
@@ -1421,25 +1625,68 @@ $("#bCola").addEventListener("click", async () => {
   }
 });
 
-$("#bFoto").addEventListener("click", () => {
-  if(!temChave()){
-    msg("#statusIA","Foto precisa da chave da API (Ajustes). Sem chave: abra a foto no app Fotos, segure sobre o texto, Copiar, e use 📋 Colar aqui — o iPhone faz o OCR sozinho.","w");
-    return;
-  }
-  $("#fFoto").click();
-});
+/* PDF com camada de texto e lido aqui mesmo, offline — por isso o seletor
+   abre sempre, e a cobranca de chave so aparece quando ela e mesmo necessaria. */
+$("#bFoto").addEventListener("click", () => $("#fFoto").click());
+
+function juntarNoCampo(txt){
+  $("#txt").value = ($("#txt").value ? $("#txt").value + "\n" : "") + txt;
+}
+const tokensDe = uso => (uso.input_tokens||0) + "/" + (uso.output_tokens||0) + " tokens";
+
 $("#fFoto").addEventListener("change", async ev => {
   const f = ev.target.files && ev.target.files[0];
   ev.target.value = "";
   if(!f) return;
-  ocupado("#statusIA","Lendo a foto…");
+
+  const ehPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+
   try{
-    const {txt, uso} = await lerFoto(f);
-    if(/^ILEG[IÍ]VEL/i.test(txt)){ msg("#statusIA","Não consegui ler o procedimento nessa foto.","w"); return; }
-    $("#txt").value = ($("#txt").value ? $("#txt").value + "\n" : "") + txt;
-    msg("#statusIA","Foto lida (" + (uso.input_tokens||0) + "/" + (uso.output_tokens||0) + " tokens). Confira o texto e toque em Analisar.","ok");
+    if(ehPdf){
+      ocupado("#statusIA", "Lendo o PDF neste aparelho…");
+      const {texto, qualidade, invalido} = await pdfTexto(f);
+
+      if(invalido){
+        msg("#statusIA", "Esse arquivo não é um PDF válido — o conteúdo não começa com %PDF.", "e");
+        return;
+      }
+      if(texto.length >= 60 && qualidade >= 0.85){
+        juntarNoCampo(texto);
+        msg("#statusIA", "PDF lido aqui mesmo — sem internet e sem custo. Confira o texto e toque em Analisar.", "ok");
+        return;
+      }
+
+      // sem camada de texto: e um escaneado (ficha fotografada)
+      if(!temChave()){
+        msg("#statusIA", "Esse PDF é escaneado — não tem texto para extrair, só imagem. Para ler assim: chave da API em Ajustes. Sem chave, abra o PDF, segure o dedo sobre o texto para o iPhone reconhecer, Copiar e 📋 Colar aqui.", "w");
+        return;
+      }
+      const mb = f.size / (1024*1024);
+      if(mb > 25){
+        msg("#statusIA", "PDF de " + mb.toFixed(1) + " MB — acima do que a API aceita. Envie página por página, ou use uma foto só da descrição.", "w");
+        return;
+      }
+      ocupado("#statusIA", "PDF escaneado (" + mb.toFixed(1) + " MB): a IA está lendo as páginas…");
+      const r = await lerPdfComIA(f);
+      if(/^ILEG[IÍ]VEL/i.test(r.txt)){ msg("#statusIA", "Não consegui ler procedimento nenhum nesse PDF.", "w"); return; }
+      juntarNoCampo(r.txt);
+      msg("#statusIA", "PDF lido pela IA (" + tokensDe(r.uso) + "). Confira o texto e toque em Analisar.", "ok");
+      return;
+    }
+
+    /* imagem */
+    if(!temChave()){
+      msg("#statusIA", "Foto precisa da chave da API (Ajustes). Sem chave: abra a foto no app Fotos, segure sobre o texto, Copiar, e use 📋 Colar aqui — o iPhone faz o OCR sozinho.", "w");
+      return;
+    }
+    ocupado("#statusIA", "Lendo a foto…");
+    const r = await lerFoto(f);
+    if(/^ILEG[IÍ]VEL/i.test(r.txt)){ msg("#statusIA", "Não consegui ler o procedimento nessa foto.", "w"); return; }
+    juntarNoCampo(r.txt);
+    msg("#statusIA", "Foto lida (" + tokensDe(r.uso) + "). Confira o texto e toque em Analisar.", "ok");
+
   }catch(e){
-    msg("#statusIA","Falhou ao ler a foto: " + e.message, "e");
+    msg("#statusIA", "Falhou ao ler o arquivo: " + e.message, "e");
   }
 });
 
