@@ -10,7 +10,6 @@ primeira abertura.
 - Cole, dite, fotografe **ou abra o PDF** da descrição → ele acha os procedimentos e sugere os códigos
 - PDF com camada de texto é lido no próprio aparelho, offline e sem custo
 - Monta o lançamento com a via de cada linha (Única 100% / Mesma 50% / Diferentes 70%)
-- Detecta o contrato (HUC, Santa Casa, Maracanaú) e calcula o valor de cada porte e o total
 - Consulta manual da tabela, com porte, auxiliares, custo operacional
 - Sem login, sem servidor, sem coleta de dados — tudo fica no aparelho
 

@@ -264,22 +264,6 @@ Ex.: Colecistectomia videolaparoscópica sem colangiografia. Herniorrafia inguin
   </div>
 
   <div class="card det">
-    <h2>Valor dos portes</h2>
-    <dl>
-      <dt>HUC</dt><dd>CBHPM 2014</dd>
-      <dt>Santa Casa</dt><dd>CBHPM 2016</dd>
-      <dt>Maracanaú</dt><dd>CBHPM 2018</dd>
-      <dt>Lidos do portal em</dt><dd>23/08/2026</dd>
-    </dl>
-    <p class="hint" style="margin:12px 0 0">
-      Valor = <b>porte anestésico × via</b>, com o arredondamento do portal (meio centavo para
-      baixo). O contrato é detectado no próprio documento; dá para trocar à mão no lançamento.
-      Renegociou contrato ou mudou a edição da CBHPM? Os valores aqui <b>não</b> se atualizam
-      sozinhos — precisam ser relidos em <b>Convênios › Valor dos Portes</b>.
-    </p>
-  </div>
-
-  <div class="card det">
     <h2>Tabela</h2>
     <dl>
       <dt>Procedimentos</dt><dd id="aN" class="mono">—</dd>
@@ -823,73 +807,12 @@ const LS = {
 
 const st = {
   achados: [],
-  hospital: null,        // detectado no texto; o seletor pode trocar
-  hospitalAuto: null,
   fav:  LS.get("fav", []),
   hist: LS.get("hist", []),
   aberto: null
 };
 
 const VIAS = [["u","Única · 100%"],["m","Mesma via · 50%"],["d","Diferentes vias · 70%"]];
-const PCT  = {u:100, m:50, d:70};
-
-/* ============================================================
-   VALOR DO PORTE POR CONTRATO
-   Cada convenio usa uma EDICAO diferente da CBHPM, entao o mesmo
-   porte paga valores diferentes. Nunca reaproveitar a tabela de um
-   hospital no outro.
-
-   Lidos do portal da COOPANEST em 23/08/2026 (Convenios > Valor dos
-   Portes) e validados contra 9 boletins reais — batem ao centavo.
-   Guardados em CENTAVOS inteiros de proposito: ver arredondamento.
-   ============================================================ */
-const PORTES = {
-  //         porte:  0      1      2      3      4      5       6       7       8
-  HUC:        [30562, 14187, 20763, 30562, 45185, 69894,  97534, 138767, 183303],
-  SANTA_CASA: [35900, 16641, 24361, 35900, 53011, 82003, 112979, 162809, 214788],
-  MARACANAU:  [44932, 19273, 29560, 44932, 69117, 99410, 134542, 178731, 225505]
-};
-
-const HOSPITAIS = [
-  {id:"HUC",        nome:"HUC",        edicao:"CBHPM 2014",
-   rx:/\bhuc\b|hospital\s+universit[áa]rio|universit[áa]rio\s+do\s+cear[áa]|walter\s+cant[íi]dio/i},
-  {id:"SANTA_CASA", nome:"Santa Casa", edicao:"CBHPM 2016",
-   rx:/santa\s+casa|miseric[óo]rdia/i},
-  {id:"MARACANAU",  nome:"Maracanaú",  edicao:"CBHPM 2018",
-   rx:/maracana[uú]/i}
-];
-
-function detectarHospital(texto){
-  for(const h of HOSPITAIS) if(h.rx.test(texto || "")) return h.id;
-  return null;
-}
-
-/* O portal arredonda meio-centavo PARA BAIXO: porte 02 da Santa Casa
-   (243,61) a 50% grava 121,80, nao 121,81. Em float o resultado sobe,
-   porque 243,61 em binario fica um fio acima do decimal exato — por
-   isso a conta inteira em centavos. */
-function centavosDaVia(centavos, via){
-  const pct = PCT[via] || 100;
-  const x = centavos * pct;              // inteiro exato
-  const q = Math.floor(x / 100), r = x % 100;
-  return r > 50 ? q + 1 : q;
-}
-
-const reais = c => (c/100).toLocaleString("pt-BR", {minimumFractionDigits:2, maximumFractionDigits:2});
-
-/* porte anestesico da tabela TUSS -> indice 0..8; "-" e vazio nao pagam */
-function porteNum(pa){
-  const n = parseInt(String(pa).replace(/\D/g,""), 10);
-  return (Number.isInteger(n) && n >= 0 && n <= 8) ? n : null;
-}
-
-function valorLinha(l, hospital){
-  const tab = PORTES[hospital];
-  if(!tab) return null;
-  const p = porteNum(l.r.pa);
-  if(p === null) return null;
-  return centavosDaVia(tab[p], l.via);
-}
 
 /* Orgao impar/mediano nao tem lado — e lancar duas linhas dele e faturar em
    duplicidade. A palavra "bilateral" costuma vir de outro ato da mesma
@@ -1067,24 +990,8 @@ function renderLancamento(){
   st.linhas = linhas;
   if(!linhas.length){ box.innerHTML=""; return; }
 
-  const hosp = st.hospital;
-  const info = HOSPITAIS.find(h => h.id === hosp);
-  let total = 0, faltando = 0;
-  const vals = linhas.map(l => {
-    const v = valorLinha(l, hosp);
-    if(hosp){ if(v === null) faltando++; else total += v; }
-    return v;
-  });
-
   box.innerHTML = `
     <div class="sechead">Lançamento sugerido</div>
-    <div class="card" style="padding:12px 13px;margin-bottom:10px">
-      <label>Contrato ${st.hospitalAuto ? '<span class="tag ok" style="margin-left:5px">detectado no documento</span>' : ""}</label>
-      <select id="selHosp">
-        <option value="">— sem valores (só os códigos) —</option>
-        ${HOSPITAIS.map(h => `<option value="${h.id}" ${hosp===h.id?"selected":""}>${h.nome} · ${h.edicao}</option>`).join("")}
-      </select>
-    </div>
     <div class="rows">
       ${linhas.map((l,i) => `
         <div class="lin">
@@ -1096,26 +1003,15 @@ function renderLancamento(){
               ${l.r.pa ? ` · porte anest. <b style="color:#6fe0bd">${esc(l.r.pa)}</b>` : ""}
               ${l.lado ? ` · ${esc(l.lado)}` : ""}
             </div>
-            <div style="margin-top:7px;display:flex;align-items:center;gap:10px">
+            <div style="margin-top:7px">
               <select data-i="${i}" class="viaSel">
                 ${VIAS.map(([v,rot]) => `<option value="${v}" ${l.via===v?"selected":""}>${rot}</option>`).join("")}
               </select>
-              ${hosp ? (vals[i] === null
-                  ? `<span style="font-size:12px;color:var(--warn);font-weight:700">sem porte</span>`
-                  : `<span style="font-size:14px;color:var(--acc);font-weight:800;font-variant-numeric:tabular-nums">R$ ${reais(vals[i])}</span>`) : ""}
             </div>
           </div>
           <button class="x" data-rm="${i}" aria-label="remover">×</button>
         </div>`).join("")}
     </div>
-    ${hosp ? `
-    <div class="card" style="margin-top:10px;padding:13px 14px;display:flex;align-items:center;gap:12px">
-      <div>
-        <div style="font-size:12px;color:var(--mut);font-weight:700;letter-spacing:.4px">TOTAL · ${esc(info.nome)}</div>
-        <div style="font-size:11.5px;color:var(--mut);margin-top:2px">${esc(info.edicao)}${faltando ? ` · ${faltando} sem porte anestésico` : ""}</div>
-      </div>
-      <div class="big" style="margin-left:auto">R$ ${reais(total)}</div>
-    </div>` : ""}
     <div class="btns" style="margin-top:10px">
       <button class="btn" id="bCopia">Copiar lançamento</button>
       <button class="btn gh" id="bSalvaHist">Salvar no histórico</button>
@@ -1126,15 +1022,8 @@ function renderLancamento(){
       conferir uma a uma. Exceção conhecida: URL/nefrolitotripsia bilateral na Santa Casa usa 50%.
     </div>`;
 
-  const selH = $("#selHosp");
-  if(selH) selH.addEventListener("change", () => {
-    st.hospital = selH.value || null;
-    LS.set("hospital", st.hospital);
-    renderLancamento();
-  });
   box.querySelectorAll(".viaSel").forEach(s => s.addEventListener("change", () => {
     st.linhas[+s.dataset.i].via = s.value;
-    renderLancamento();                 // a via muda o valor da linha e o total
   }));
   box.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", () => {
     st.linhas.splice(+b.dataset.rm, 1); renderLancamento();
@@ -1145,18 +1034,10 @@ function renderLancamento(){
 
 function textoLancamento(){
   const rot = Object.fromEntries(VIAS);
-  const info = HOSPITAIS.find(h => h.id === st.hospital);
-  let total = 0;
-  const linhas = st.linhas.map((l,i) => {
-    const v = valorLinha(l, st.hospital);
-    if(v !== null) total += v;
-    return `${i+1}. ${l.r.c} — ${l.r.t}${l.lado ? " ("+l.lado+")" : ""} — ${rot[l.via]}` +
-           (l.r.pa ? " — porte anest. " + l.r.pa : "") +
-           (v !== null ? " — R$ " + reais(v) : (st.hospital ? " — sem porte" : ""));
-  });
-  return "Anestcode · " + hoje() + (info ? " · " + info.nome : "") + "\n" +
-    linhas.join("\n") +
-    (info ? `\n\nTotal: R$ ${reais(total)}  (${info.edicao})` : "") +
+  return "Anestcode · " + hoje() + "\n" +
+    st.linhas.map((l,i) =>
+      `${i+1}. ${l.r.c} — ${l.r.t}${l.lado ? " ("+l.lado+")" : ""} — ${rot[l.via]}${l.r.pa ? " — porte anest. "+l.r.pa : ""}`
+    ).join("\n") +
     "\n\nConferir no portal: procedimento, técnica, órgão e lateralidade.";
 }
 
@@ -1173,12 +1054,8 @@ async function copiarLancamento(){
 
 function salvarHistorico(){
   if(!st.linhas || !st.linhas.length) return;
-  let total = 0;
-  for(const l of st.linhas){ const v = valorLinha(l, st.hospital); if(v !== null) total += v; }
   st.hist.unshift({
     d: hoje(), ts: Date.now(),
-    hosp: st.hospital,
-    total: st.hospital ? total : null,
     txt: ($("#txt").value || "").slice(0,300),
     linhas: st.linhas.map(l => ({c:l.r.c, t:l.r.t, lado:l.lado, via:l.via, pa:l.r.pa}))
   });
@@ -1427,8 +1304,8 @@ function renderFavoritos(){
   bh.innerHTML = st.hist.map((h,i) => `
     <div class="card" style="padding:12px 13px">
       <div style="display:flex;align-items:center;gap:9px">
-        <div style="font-weight:700;font-size:13.5px">${esc(h.d)}${h.hosp ? ` · ${esc((HOSPITAIS.find(x=>x.id===h.hosp)||{nome:""}).nome)}` : ""}</div>
-        <div class="chip" style="margin-left:auto;padding:3px 10px">${h.total ? `<b>R$ ${reais(h.total)}</b>` : `<b>${h.linhas.length}</b> códigos`}</div>
+        <div style="font-weight:700;font-size:13.5px">${esc(h.d)}</div>
+        <div class="chip" style="margin-left:auto;padding:3px 10px"><b>${h.linhas.length}</b> códigos</div>
         <button class="x" data-delh="${i}" style="background:none;border:none;color:#54626f;font-size:19px">×</button>
       </div>
       <div style="margin-top:8px">
@@ -1809,8 +1686,6 @@ async function rodarAnalise(){
 
   st.achados = analisar(texto);
   st.linhas = null;
-  st.hospitalAuto = detectarHospital(texto);
-  st.hospital = st.hospitalAuto || LS.get("hospital", null);
   renderAnalise();
 
   if(!st.achados.length){
