@@ -970,15 +970,19 @@ function montarLinhas(){
       }
     }
   }
-  /* Excecao confirmada (Santa Casa/urologia): em URL ou nefrolitotripsia
-     bilateral, a repeticao contralateral vai como Mesma Via 50%, nao 70%. */
-  const URO_MESMA_VIA = new Set(["31102360","31102379","31101275","31102077","40813878"]);
+  /* CBHPM, porte anestesico, alinea (g): cirurgia bilateral no mesmo ato
+     anestesico soma 70%, INDEPENDENTE da via de acesso -- inclusive URL e
+     nefrolitotripsia da Santa Casa, que entram pela mesma uretra. Os 50% da
+     alinea (e) valem so para ato adicional no MESMO lado. (Corrigido em
+     27/08/2026: a regra anterior usava 50% no contralateral, que e o criterio
+     do CIRURGIAO, item 7.3, nao o do anestesista.)
+     A comparacao e sempre com o lado do ato de MAIOR PORTE (1a linha, 100%),
+     nunca com a linha anterior. */
+  const ladoRef = (linhas.find(x => x.lado) || {}).lado || "";
 
   linhas.forEach((l, i) => {
     if(i === 0){ l.via = "u"; return; }
-    const ant = linhas[i-1];
-    if(l.r.c === ant.r.c && URO_MESMA_VIA.has(l.r.c)) l.via = "m";
-    else if(l.lado && ant.lado && l.lado !== ant.lado) l.via = "d";
+    if(l.lado && ladoRef && l.lado !== ladoRef) l.via = "d";
     else l.via = "m";
   });
   return linhas;
@@ -1019,7 +1023,7 @@ function renderLancamento(){
     <div class="warn" style="margin-top:10px">
       Regra do portal: 1ª linha <b>Única 100%</b>; mesmo acesso/órgão/lado → <b>Mesma via 50%</b>;
       lado ou acesso diferente → <b>Diferentes vias 70%</b>. O portal sugere 50% em toda linha nova —
-      conferir uma a uma. Exceção conhecida: URL/nefrolitotripsia bilateral na Santa Casa usa 50%.
+      conferir uma a uma. <b>Bilateral no mesmo ato anestésico é sempre 70%</b>, mesmo pela mesma via (CBHPM, alínea g) — inclui URL/nefrolitotripsia da Santa Casa.
     </div>`;
 
   box.querySelectorAll(".viaSel").forEach(s => s.addEventListener("change", () => {
